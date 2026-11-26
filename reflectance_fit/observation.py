@@ -175,3 +175,21 @@ def split_holdout(
         train = [observations[i] for i in order if i not in hold_idx]
         hold = [observations[ranked[-1]]]
     return train, hold
+
+
+# 灯光选点函数也放在观测模块命名空间，方便旧调用方按“下一观测”导入。
+from .lighting import (  # noqa: E402
+    render_lighting_preview,
+    select_next_observation,
+)
+
+__all__ = [
+    "DEFAULT_PROTOCOL_DEG",
+    "POOR_PROTOCOL_DEG",
+    "protocol_to_radians",
+    "render_observations",
+    "perturb_observations",
+    "split_holdout",
+    "render_lighting_preview",
+    "select_next_observation",
+]

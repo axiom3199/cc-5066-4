@@ -20,8 +20,14 @@
 # 先安装 GUI 依赖
 pip install PySide6
 
+# 或安装 v0.2.0 验证过的完整锁定环境（含 GUI 与 pytest）
+python -m pip install -r requirements-lock.txt
+
 # 启动反射拟合图形界面
 python -m reflectance_fit.gui
+
+# 安装本包后也可使用同一图形入口
+reflectance-gui
 ```
 
 > 无显示器/无 PySide6 的环境无法启动窗口，此时可用命令行 `demo --report`
@@ -102,6 +108,36 @@ view01,view_01.png,0,0,30,0
 （见下方稳定性测试）；报告中的候选解列表与可行范围就是为了让这种不确定性
 可见，而不是用一个小数点后四位的单点制造"精确恢复"的假象。
 
+### 3.1 优化后端迁移版本（v0.2.0）
+
+反射拟合的新路径版本契约为
+`reflection-optimizer-backend-migration/v2.0`，适配层位于
+`reflectance_fit/optimization.py`：
+
+* 默认后端 ID：`scipy-lbfgsb-logit-v2`。物理范围在适配层显式转换为无界
+  logit 变量；若后端使用物理空间梯度，则按
+  `dL/dz = dL/dp · dp/dz` 转换梯度尺度。需要显式边界的求解器可直接使用
+  `physical_bounds()`。
+* 旧路径保留为 `scipy-lbfgsb-logit-v1`，可通过
+  `fit_brdf(..., backend=LEGACY_BACKEND_ID)` 或 `fit_brdf_legacy(...)`
+  运行，用于旧样例和新旧契约对照。
+* `FitResult.execution_evidence` 保存后端 ID、停止原因、迭代/求值次数、
+  边界检查和求解后独立重渲染 RMSE。优化器的 `success` 只作为证据之一，
+  不会被当成材质可接受的充分条件。
+* 尺度化 Jacobian 的 SVD 诊断位于 `diagnostics.analyze_flat_valley()`；
+  平坦最小奇异方向对应粗糙度↔镜面等耦合参数谷，仍按原逻辑输出可行范围。
+* 旧材质 JSON 工程由 `project.load_project()` 兼容装载；材质资产编辑器
+  `asset_editor.MaterialAssetEditor` 会把未确定的粗糙度范围交给
+  `lighting.render_lighting_preview()`，并用
+  `select_next_observation()` 选择重渲染误差最大的照明角度。
+* 当新旧后端都能解释训练样片时，`migration.compare_optimizer_backends()`
+  仍要求留出光位的实测/重渲染高光尺寸证据；缺少图像时返回
+  `rejected_missing_actual_highlight_evidence`，不会伪报迁移成功。
+
+GUI 拟合期间会显示“拟合状态：运行中”；拟合完成后会实际校验反射曲线和
+材质球预览，并在图上用红色 `[异常: ...]` 与状态标签标出空曲线、非有限值、
+负 BRDF、全黑预览或平铺纯色等问题。
+
 ---
 
 ## 4. 命令行（仅辅助）
@@ -119,7 +155,8 @@ python -m reflectance_fit.cli demo --report report.png --json result.json
 python -m reflectance_fit.cli demo --poor --report poor.png
 
 # 从含 views.csv 的图像目录拟合
-python -m reflectance_fit.cli fit-dir /path/to/capture --report out.png
+python -m reflectance_fit.cli fit-dir /path/to/capture \
+  --report out.png --json fit-result.json
 ```
 
 `demo` 可用参数：`--ground-truth '{"roughness":0.2}'`、`--noise`、
@@ -146,7 +183,7 @@ python -m reflectance_fit.cli fit-dir /path/to/capture --report out.png
 运行测试：
 
 ```bash
-pip install pytest
+pip install -r requirements-lock.txt  # 或至少 pip install pytest
 python -m pytest -q
 ```
 
@@ -160,7 +197,13 @@ python -m pytest -q
 | `params.py` | 固定参数空间/范围、logit 有界变换、线性 sRGB 编解码、尺度约定 |
 | `geometry.py` | 已知相机/光照/法线的观测数据结构与角度工具 |
 | `observation.py` | 真值渲染、噪声/标定误差注入、分层留出划分、采集协议 |
-| `fitter.py` | 多起点优化、留出选解、轮廓扫描可行范围、残差 |
+| `optimization.py` | v2 优化后端契约、参数边界/logit/梯度尺度转换 |
+| `fitter.py` | 新旧后端、多起点优化、留出选解、轮廓扫描可行范围、执行证据 |
+| `evidence.py` | 边界检查、独立重渲染 RMSE、高光尺寸与迁移接受证据 |
+| `diagnostics.py` | SVD 平坦参数谷、反射曲线与材质预览校验 |
+| `lighting.py` | 粗糙度范围灯光预览、按最大误差光位推荐下一观测 |
+| `project.py` / `asset_editor.py` | 旧材质工程兼容迁移、材质资产编辑器门面 |
+| `migration.py` | 新旧优化后端对照与留出高光迁移验收 |
 | `render.py` | 反射曲线与材质球重渲染预览 |
 | `texture.py` | ROI 区域选取、截尾均值聚合、色块纹理 |
 | `io_texture.py` | `views.csv` 图像目录载入与校验 |

@@ -30,7 +30,12 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from .brdf import shade_rgb
-from .fitter import FitResult, fit_brdf
+from .diagnostics import (
+    ValidationIssue,
+    validate_material_preview,
+    validate_reflection_curve,
+)
+from .fitter import FitResult, fit_reflection
 from .geometry import Observation
 from .observation import (
     DEFAULT_PROTOCOL_DEG,
@@ -85,8 +90,13 @@ def run_fit(
     holdout_fraction: float = 0.25,
     fixed: Optional[Dict[str, float]] = None,
     seed: int = 42,
+    backend: str = "reflection_fit_v2",
 ) -> FitResult:
-    """界面/CLI 共用的拟合入口，包含视角分层留出与输入校验。"""
+    """界面/CLI 共用的拟合入口，包含视角分层留出与输入校验。
+
+    纹理制作界面和 CLI 都通过 :func:`fit_reflection` 调用迁移后的新后端
+    适配路径；需要对照旧后端时可显式传 ``backend=LEGACY_BACKEND_ID``。
+    """
     if len(observations) < 4:
         raise FitAppError(
             f"至少需要 4 个角度的观测（当前 {len(observations)} 个），"
@@ -94,7 +104,48 @@ def run_fit(
         )
     train, hold = split_holdout(list(observations), holdout_fraction,
                                 rng=np.random.default_rng(seed))
-    return fit_brdf(train, hold, fixed=fixed)
+    from .optimization import DEFAULT_BACKEND_ID, LEGACY_BACKEND_ID
+    selected_backend = DEFAULT_BACKEND_ID if backend in {
+        "reflection_fit_v2", "new", "v2", DEFAULT_BACKEND_ID
+    } else LEGACY_BACKEND_ID if backend in {
+        "legacy", "old", "v1", LEGACY_BACKEND_ID
+    } else backend
+    fit = fit_reflection(train, hold, fixed=fixed, backend=selected_backend)
+    validate_fit_artifacts(fit)
+    return fit
+
+
+def validate_fit_artifacts(fit: FitResult) -> Dict[str, object]:
+    """拟合后校验反射曲线与材质球预览，并把异常写回结果对象。"""
+    marks: List[Dict[str, str]] = []
+    curve = None
+    preview = None
+    try:
+        curve = reflection_curve(fit.parameters)
+        marks.extend(issue.to_dict() for issue in validate_reflection_curve(curve))
+    except Exception as exc:
+        marks.append({
+            "code": "curve_render_failed",
+            "severity": "error",
+            "message": f"反射曲线生成失败: {type(exc).__name__}: {exc}",
+        })
+    try:
+        preview = render_sphere(fit.parameters, size=120)
+        marks.extend(issue.to_dict() for issue in validate_material_preview(preview))
+    except Exception as exc:
+        marks.append({
+            "code": "preview_render_failed",
+            "severity": "error",
+            "message": f"材质预览生成失败: {type(exc).__name__}: {exc}",
+        })
+    fit.validation_issues = marks
+    return {
+        "curve": curve,
+        "preview": preview,
+        "issues": marks,
+        "has_error": any(item["severity"] == "error" for item in marks),
+        "has_warning": any(item["severity"] == "warning" for item in marks),
+    }
 
 
 def build_report_figure(gt_params: Optional[Dict[str, float]],
@@ -147,30 +198,74 @@ def build_report_figure(gt_params: Optional[Dict[str, float]],
     ax_res.legend(fontsize=8)
 
     # --- 反射曲线 ---------------------------------------------------------
-    curve = reflection_curve(fit.parameters)
-    ax_curve.plot(curve["theta_deg"], curve["diffuse_luminance"],
-                  "--", label="diffuse", color="tab:orange")
-    ax_curve.plot(curve["theta_deg"], curve["specular_luminance"],
-                  "--", label="specular", color="tab:blue")
-    ax_curve.plot(curve["theta_deg"], curve["luminance"],
-                  "-", lw=2, label="total BRDF", color="k")
-    if gt_params is not None:
-        gt_curve = reflection_curve(gt_params)
-        ax_curve.plot(gt_curve["theta_deg"], gt_curve["luminance"],
-                      ":", lw=2, color="tab:red", label="ground truth")
+    curve_issues: List[ValidationIssue] = []
+    try:
+        curve = reflection_curve(fit.parameters)
+        ax_curve.plot(curve["theta_deg"], curve["diffuse_luminance"],
+                      "--", label="diffuse", color="tab:orange")
+        ax_curve.plot(curve["theta_deg"], curve["specular_luminance"],
+                      "--", label="specular", color="tab:blue")
+        ax_curve.plot(curve["theta_deg"], curve["luminance"],
+                      "-", lw=2, label="total BRDF", color="k")
+        if gt_params is not None:
+            gt_curve = reflection_curve(gt_params)
+            ax_curve.plot(gt_curve["theta_deg"], gt_curve["luminance"],
+                          ":", lw=2, color="tab:red", label="ground truth")
+        curve_issues = validate_reflection_curve(curve)
+    except Exception as exc:
+        curve = None
+        curve_issues = [ValidationIssue(
+            "curve_render_failed", "error",
+            f"反射曲线生成失败: {type(exc).__name__}: {exc}",
+        )]
     ax_curve.set_xlabel("outgoing polar angle (deg)")
     ax_curve.set_ylabel("BRDF luminance (sr$^{-1}$)")
-    ax_curve.set_title("Reflection curve (light fixed at 45 deg, true BRDF)")
-    ax_curve.legend(fontsize=8)
+    curve_title = "Reflection curve (light fixed at 45 deg, true BRDF)"
+    if curve_issues:
+        curve_title += "  [异常: " + "; ".join(i.code for i in curve_issues[:2]) + "]"
+    ax_curve.set_title(curve_title, color="tab:red" if curve_issues else "black")
+    if curve_issues:
+        ax_curve.text(
+            0.02, 0.02, "\n".join(f"! {i.message}" for i in curve_issues[:3]),
+            transform=ax_curve.transAxes, fontsize=7, color="tab:red",
+            va="bottom", ha="left",
+            bbox={"facecolor": "white", "edgecolor": "tab:red", "alpha": 0.8},
+        )
+    if curve is not None:
+        ax_curve.legend(fontsize=8)
     ax_curve.grid(alpha=0.3)
 
     # --- 材质球预览 -------------------------------------------------------
-    sphere = render_sphere(fit.parameters, size=140)
-    gain = preview_gain_for(sphere)
-    ax_sphere.imshow(to_display_srgb(sphere, gain=gain))
-    ax_sphere.set_title("Material preview (re-rendered)")
+    preview_issues: List[ValidationIssue] = []
+    try:
+        sphere = render_sphere(fit.parameters, size=140)
+        gain = preview_gain_for(sphere)
+        ax_sphere.imshow(to_display_srgb(sphere, gain=gain))
+        preview_issues = validate_material_preview(sphere)
+    except Exception as exc:
+        sphere = None
+        preview_issues = [ValidationIssue(
+            "preview_render_failed", "error",
+            f"材质预览生成失败: {type(exc).__name__}: {exc}",
+        )]
+    preview_title = "Material preview (re-rendered)"
+    if preview_issues:
+        preview_title += "  [异常: " + "; ".join(i.code for i in preview_issues[:2]) + "]"
+    ax_sphere.set_title(
+        preview_title, color="tab:red" if preview_issues else "black"
+    )
+    if preview_issues:
+        ax_sphere.text(
+            0.5, 0.03, "\n".join(f"! {i.message}" for i in preview_issues[:2]),
+            transform=ax_sphere.transAxes, fontsize=8, color="white",
+            ha="center", va="bottom",
+            bbox={"facecolor": "tab:red", "edgecolor": "darkred", "alpha": 0.75},
+        )
     ax_sphere.set_aspect("equal")
     ax_sphere.axis("off")
+    fit.validation_issues = [
+        issue.to_dict() for issue in (*curve_issues, *preview_issues)
+    ]
 
     # --- 参数/可行范围表 --------------------------------------------------
     rows = []
@@ -290,6 +385,9 @@ def launch_gui() -> int:
             self.btn_fit = QtWidgets.QPushButton("执行反射拟合")
             self.btn_fit.setStyleSheet("font-weight:bold")
             form_fit.addWidget(self.btn_fit, row, 0, 1, 2)
+            self.fit_state_label = QtWidgets.QLabel("拟合状态：空闲")
+            self.fit_state_label.setObjectName("fitStateLabel")
+            form_fit.addWidget(self.fit_state_label, row + 1, 0, 1, 2)
             left.addWidget(box_fit)
 
             box_obj = QtWidgets.QGroupBox("目标函数与参数")
@@ -459,6 +557,9 @@ def launch_gui() -> int:
             return fixed
 
         def _on_fit(self) -> None:
+            error: Exception | None = None
+            self._set_fit_running(True, "反射拟合运行中：多起点优化与真实重渲染核验…")
+            QtWidgets.QApplication.processEvents()
             try:
                 if not self.views:
                     raise FitAppError("请先合成或载入观测图像。")
@@ -474,7 +575,25 @@ def launch_gui() -> int:
                 self.fit_result = result
                 self._present_result(result)
             except Exception as exc:
+                error = exc
                 self._show_error(exc)
+                self.fit_state_label.setText(f"拟合状态：异常 — {exc}")
+            finally:
+                self._set_fit_running(False)
+                if error is not None:
+                    self.fit_state_label.setStyleSheet(
+                        "color: #b00020; font-weight: bold;"
+                    )
+
+        def _set_fit_running(self, running: bool, message: str = "") -> None:
+            self.btn_fit.setEnabled(not running)
+            if running:
+                self.fit_state_label.setText("拟合状态：运行中…")
+                self.fit_state_label.setStyleSheet("color: #8a5a00; font-weight: bold;")
+                self.status.showMessage(message or "反射拟合运行中…")
+            else:
+                self.fit_state_label.setStyleSheet("")
+            QtWidgets.QApplication.processEvents()
 
         def _present_result(self, result: FitResult) -> None:
             self.objective_text.clear()
@@ -500,12 +619,28 @@ def launch_gui() -> int:
             )
             self.report_canvas.draw_idle()
             self.tabs.setCurrentIndex(1)
-            if result.identifiable:
-                self.status.showMessage("拟合完成：侧视充分，已按留出角度选解。")
+            issues = result.validation_issues
+            if issues:
+                self.objective_text.appendPlainText("反射曲线/材质预览校验异常:")
+                for item in issues:
+                    self.objective_text.appendPlainText(
+                        f"  [{item['severity']}] {item['code']}: {item['message']}"
+                    )
+            if issues:
+                self.fit_state_label.setText("拟合状态：完成，但曲线/预览存在异常标记")
+                self.fit_state_label.setStyleSheet("color: #b00020; font-weight: bold;")
+                self.status.showMessage("拟合完成但反射曲线或材质预览校验异常，请查看红色标记。")
+            elif result.identifiable:
+                self.fit_state_label.setText("拟合状态：完成，曲线与预览校验通过")
             else:
-                self.status.showMessage(
-                    "拟合完成但可辨识性不足：请查看参数可行范围，避免误读为唯一解。"
-                )
+                self.fit_state_label.setText("拟合状态：完成（可辨识性不足，已保留诊断）")
+            if not issues:
+                if result.identifiable:
+                    self.status.showMessage("拟合完成：侧视充分，已按留出角度选解；曲线与预览校验通过。")
+                else:
+                    self.status.showMessage(
+                        "拟合完成但可辨识性不足：请查看参数可行范围，避免误读为唯一解。"
+                    )
 
         # -- 工具 ----------------------------------------------------------
         def _show_error(self, exc: Exception) -> None:

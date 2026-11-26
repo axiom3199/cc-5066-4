@@ -50,6 +50,32 @@ def _print_result(result, gt: Dict[str, float] | None) -> None:
                   f"绝对偏差={err:.4f}")
 
 
+def _result_payload(result, gt: Dict[str, float] | None = None) -> Dict[str, object]:
+    return {
+        "parameters": result.parameters,
+        "feasible_ranges": result.feasible_ranges,
+        "train_rmse": result.train_rmse,
+        "holdout_rmse": result.holdout_rmse,
+        "identifiable": result.identifiable,
+        "status": result.status,
+        "implementation": result.implementation,
+        "backend": result.backend,
+        "contract_version": result.contract_version,
+        "optimizer_success": result.optimizer_success,
+        "stopping_reason": result.stopping_reason,
+        "boundary_checks": result.boundary_checks,
+        "execution_evidence": result.execution_evidence,
+        "validation_issues": result.validation_issues,
+        "ground_truth": gt,
+    }
+
+
+def _write_json(path: str, payload: Dict[str, object]) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    print(f"JSON 结果已写入: {path}")
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     gt = _parse_gt(args.ground_truth)
     print("真值参数:", json.dumps(gt, ensure_ascii=False))
@@ -72,18 +98,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
         fig.savefig(args.report, dpi=130)
         print(f"\n报告图已写入: {args.report}")
     if args.json_out:
-        payload = {
-            "parameters": result.parameters,
-            "feasible_ranges": result.feasible_ranges,
-            "train_rmse": result.train_rmse,
-            "holdout_rmse": result.holdout_rmse,
-            "identifiable": result.identifiable,
-            "status": result.status,
-            "ground_truth": gt,
-        }
-        with open(args.json_out, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
-        print(f"JSON 结果已写入: {args.json_out}")
+        _write_json(args.json_out, _result_payload(result, gt))
     return 0
 
 
@@ -101,6 +116,8 @@ def cmd_fit_dir(args: argparse.Namespace) -> int:
         fig = build_report_figure(None, result, observations)
         fig.savefig(args.report, dpi=130)
         print(f"\n报告图已写入: {args.report}")
+    if args.json_out:
+        _write_json(args.json_out, _result_payload(result))
     return 0
 
 
@@ -179,6 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dir.add_argument("directory")
     p_dir.add_argument("--holdout", type=float, default=0.25)
     p_dir.add_argument("--report")
+    p_dir.add_argument("--json", dest="json_out", help="导出结果与执行证据 JSON")
     p_dir.set_defaults(func=cmd_fit_dir)
 
     p_check = sub.add_parser("check", help="BRDF 物理性质自检")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "controlled-reflectance-fitter"
-version = "0.1.0"
+version = "0.2.0"
 description = "受控材质反射拟合器：已知几何/相机/光照下的多角度 GGX BRDF 拟合与重渲染验证"
 readme = "docs/README.md"
 requires-python = ">=3.10"
