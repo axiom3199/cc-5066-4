@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "controlled-reflectance-fitter"
+version = "0.1.0"
+description = "受控材质反射拟合器：已知几何/相机/光照下的多角度 GGX BRDF 拟合与重渲染验证"
+readme = "docs/README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pillow>=9.0",
+    "matplotlib>=3.6",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+reflectance-fit = "reflectance_fit.cli:main"
+reflectance-gui = "reflectance_fit.gui:launch_gui"
+
+[tool.setuptools]
+packages = ["reflectance_fit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

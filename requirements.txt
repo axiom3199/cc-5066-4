@@ -1,0 +1,6 @@
+numpy>=1.24
+scipy>=1.10
+pillow>=9.0
+matplotlib>=3.6
+# 图形界面（反射拟合主入口）所需；无头环境仅用 CLI/报告时可不装
+PySide6>=6.5
